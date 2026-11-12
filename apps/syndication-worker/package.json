@@ -1,0 +1,21 @@
+{
+  "name": "@digitalcanopy/syndication-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "deploy:staging": "wrangler deploy --env staging"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "@digitalcanopy/syndication-core": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.109.0"
+  }
+}

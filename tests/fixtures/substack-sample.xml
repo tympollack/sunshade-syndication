@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>SunShade Systems Dispatch</title>
+    <link>https://sunshade.substack.com</link>
+    <description>Engineering &amp; product notes from SunShade Systems.</description>
+    <item>
+      <title>Edge Observability &amp; Privacy-First Links &mdash; Part 2</title>
+      <link>https://sunshade.substack.com/p/edge-observability-part-2</link>
+      <guid isPermaLink="false">substack:post:987654</guid>
+      <pubDate>Thu, 12 Nov 2026 14:30:00 GMT</pubDate>
+      <description>&lt;p&gt;We&rsquo;re shipping deterministic shortlink routing &amp;amp; edge telemetry across Cloudflare Workers.&lt;/p&gt;</description>
+      <enclosure url="https://cdn.sunshade.icu/media/edge-observability-cover.jpg" length="124580" type="image/jpeg" />
+    </item>
+  </channel>
+</rss>

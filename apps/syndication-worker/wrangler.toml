@@ -1,0 +1,63 @@
+name = "sunshade-syndication-worker"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+SERVICE_NAME = "sunshade-syndication"
+LINKS_API_URL = "https://links.sunshade.icu"
+BUILD_TIME = "2026-11-12T00:00:00Z"
+
+[triggers]
+crons = [
+  "*/30 * * * *", # Substack RSS poller (every 30 minutes)
+  "0 6 * * *"     # Daily OAuth token expiry scanner (06:00 UTC)
+]
+
+# KV namespace for operational cursors (e.g., lastPollAt) and short-lived idempotency locks
+# [[kv_namespaces]]
+# binding = "SYNDICATION_KV"
+# id = "REPLACE_WITH_PROD_KV_NAMESPACE_ID"
+
+# Cloudflare Queue for per-channel isolated dispatch retries
+# [[queues.producers]]
+# binding = "SYNDICATION_QUEUE"
+# queue = "syndication-dispatch-queue"
+#
+# [[queues.consumers]]
+# queue = "syndication-dispatch-queue"
+# max_batch_size = 10
+# max_batch_timeout = 5
+# max_retries = 5
+# dead_letter_queue = "syndication-dispatch-dlq"
+
+# Required runtime secrets (configure via `wrangler secret put <NAME>`):
+# - SUPABASE_URL
+# - SUPABASE_SERVICE_ROLE_KEY
+# - SUNSHADE_MASTER_API_KEY
+# - TRACKER_WEBHOOK_SECRET
+# - INTERNAL_HEALTH_TOKEN
+
+[env.staging]
+name = "sunshade-syndication-worker-stag"
+route = { pattern = "publish-stag.sunshade.icu/*", zone_name = "sunshade.icu" }
+
+[env.staging.vars]
+SERVICE_NAME = "sunshade-syndication"
+LINKS_API_URL = "https://links-stag.sunshade.icu"
+BUILD_TIME = "2026-11-12T00:00:00Z"
+
+# [[env.staging.kv_namespaces]]
+# binding = "SYNDICATION_KV"
+# id = "REPLACE_WITH_STAG_KV_NAMESPACE_ID"
+
+# [[env.staging.queues.producers]]
+# binding = "SYNDICATION_QUEUE"
+# queue = "syndication-dispatch-queue-stag"
+#
+# [[env.staging.queues.consumers]]
+# queue = "syndication-dispatch-queue-stag"
+# max_batch_size = 10
+# max_batch_timeout = 5
+# max_retries = 5
+# dead_letter_queue = "syndication-dispatch-dlq-stag"

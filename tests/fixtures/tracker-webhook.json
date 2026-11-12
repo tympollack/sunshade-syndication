@@ -1,0 +1,18 @@
+{
+  "event": "item.status_changed",
+  "timestamp": "2026-11-12T15:00:00.000Z",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "data": {
+    "item_id": "33333333-3333-4333-8333-333333333301",
+    "external_ref_id": "SYN-104",
+    "project_key": "SYN",
+    "title": "Introducing SunShade Syndication Edge Worker",
+    "summary": "Isolated multi-channel publishing across Bluesky, LinkedIn, X, and Meta.",
+    "old_status": "in_review",
+    "new_status": "syndicated",
+    "canonical_url": "https://publish-stag.sunshade.icu/posts/syn-104",
+    "tags": ["SunShade", "CloudflareWorkers", "Edge"],
+    "media_urls": ["https://cdn.sunshade.icu/media/syn-104.png"],
+    "target_platforms": ["bluesky", "linkedin", "x"]
+  }
+}

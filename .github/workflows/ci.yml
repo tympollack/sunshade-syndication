@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - staging
+  push:
+    branches:
+      - staging
+
+jobs:
+  verify:
+    name: Typecheck, Unit Tests & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify no SQL migrations in service repo
+        run: |
+          if find . -path ./node_modules -prune -o -name '*.sql' -print | grep -q .; then
+            echo "ERROR: SQL migration files belong exclusively in sunshade-db-platform."
+            exit 1
+          fi
+
+      - name: Typecheck workspaces
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build workspaces
+        run: npm run build

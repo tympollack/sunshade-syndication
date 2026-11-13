@@ -3,7 +3,8 @@ import type { WorkerEnv } from '../types.js';
 import { logger } from '../lib/logger.js';
 import { getSyndicationDbClient, type SyndicationDbClient } from '../lib/supabase.js';
 
-export const OAUTH_EXPIRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const OAUTH_EXPIRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000; // 7 days default
+export const SHORT_LIVED_HORIZON_MS = 2 * 60 * 60 * 1000; // 2 hours for X / Bluesky
 
 export interface ChannelConnectionRecord {
   id: string;
@@ -21,6 +22,7 @@ export interface RefreshTokenResult {
   success: boolean;
   accessToken?: string;
   refreshToken?: string;
+  pageAccessToken?: string;
   tokenExpiresAt?: string;
   isPermanentAuthFailure?: boolean;
   error?: string;
@@ -193,16 +195,20 @@ export async function refreshXOAuth(
 
 /**
  * Exchanges a short/expiring Meta Graph User access token for a 60-day long-lived token.
+ * Uses HTTP POST with request body to avoid embedding client secrets and tokens in URLs.
  */
 export async function refreshMetaOAuth(
   credentials: Record<string, unknown>,
   fetchFn: FetchFunction = fetch,
 ): Promise<RefreshTokenResult> {
-  const accessToken = String(credentials['pageAccessToken'] ?? credentials['accessToken'] ?? '');
+  const userAccessToken = String(
+    credentials['userAccessToken'] ?? credentials['accessToken'] ?? credentials['pageAccessToken'] ?? '',
+  );
   const clientId = String(credentials['clientId'] ?? '');
   const clientSecret = String(credentials['clientSecret'] ?? '');
+  const pageId = String(credentials['pageId'] ?? '');
 
-  if (!accessToken || !clientId || !clientSecret) {
+  if (!userAccessToken || !clientId || !clientSecret) {
     return {
       success: false,
       isPermanentAuthFailure: true,
@@ -210,14 +216,19 @@ export async function refreshMetaOAuth(
     };
   }
 
-  const url = new URL('https://graph.facebook.com/v21.0/oauth/access_token');
-  url.searchParams.set('grant_type', 'fb_exchange_token');
-  url.searchParams.set('client_id', clientId);
-  url.searchParams.set('client_secret', clientSecret);
-  url.searchParams.set('fb_exchange_token', accessToken);
+  const params = new URLSearchParams({
+    grant_type: 'fb_exchange_token',
+    client_id: clientId,
+    client_secret: clientSecret,
+    fb_exchange_token: userAccessToken,
+  });
 
   try {
-    const res = await fetchFn(url.toString(), { method: 'GET' });
+    const res = await fetchFn('https://graph.facebook.com/v21.0/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
 
     if (!res.ok) {
       const isAuthErr = res.status === 400 || res.status === 401;
@@ -237,12 +248,34 @@ export async function refreshMetaOAuth(
       return { success: false, error: 'Meta response omitted access_token' };
     }
 
+    const longLivedUserToken = data.access_token;
+    let pageAccessToken: string | undefined;
+
+    // If pageId is provided, fetch the page token using the new long-lived user token
+    if (pageId && pageId !== 'me') {
+      try {
+        const pageRes = await fetchFn(`https://graph.facebook.com/v21.0/${pageId}?fields=access_token`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${longLivedUserToken}` },
+        });
+        if (pageRes.ok) {
+          const pageData = (await pageRes.json()) as { access_token?: string };
+          if (pageData.access_token) {
+            pageAccessToken = pageData.access_token;
+          }
+        }
+      } catch {
+        // Fall back gracefully to user token
+      }
+    }
+
     const expiresInSec = data.expires_in ?? 5184000; // default 60 days
     const tokenExpiresAt = new Date(Date.now() + expiresInSec * 1000).toISOString();
 
     return {
       success: true,
-      accessToken: data.access_token,
+      accessToken: longLivedUserToken,
+      ...(pageAccessToken ? { pageAccessToken } : {}),
       tokenExpiresAt,
     };
   } catch (err) {
@@ -342,9 +375,48 @@ export async function dispatchTokenRefresh(
 }
 
 /**
- * Daily OAuth token expiry scanner (`0 6 * * *`).
+ * Maps refreshed tokens to the exact credential keys consumed by each platform adapter.
+ */
+export function buildUpdatedCredentials(
+  platform: SocialPlatform,
+  existingCreds: Record<string, unknown>,
+  refreshResult: RefreshTokenResult,
+): Record<string, unknown> {
+  const updated: Record<string, unknown> = {
+    ...existingCreds,
+    accessToken: refreshResult.accessToken,
+  };
+
+  if (refreshResult.refreshToken) {
+    updated['refreshToken'] = refreshResult.refreshToken;
+  }
+
+  if (platform === 'bluesky') {
+    // BlueskyAdapter consumes `accessJwt`; refreshBlueskySession consumes `refreshJwt`
+    updated['accessJwt'] = refreshResult.accessToken;
+    if (refreshResult.refreshToken) {
+      updated['refreshJwt'] = refreshResult.refreshToken;
+    }
+  } else if (platform === 'x') {
+    // XTwitterAdapter consumes `bearerToken`
+    updated['bearerToken'] = refreshResult.accessToken;
+  } else if (platform === 'meta') {
+    // MetaGraphAdapter consumes `pageAccessToken`
+    if (refreshResult.pageAccessToken) {
+      updated['pageAccessToken'] = refreshResult.pageAccessToken;
+    } else if (!existingCreds['pageAccessToken'] || existingCreds['userAccessToken']) {
+      updated['pageAccessToken'] = refreshResult.accessToken;
+    }
+    updated['userAccessToken'] = refreshResult.accessToken;
+  }
+
+  return updated;
+}
+
+/**
+ * Scheduled OAuth token expiry scanner.
  * Scans `syndication.channel_connections` for active connections expiring
- * within 7 days (`token_expires_at <= now() + 7 days`) and refreshes them.
+ * on or before the horizon and refreshes them.
  */
 export async function handleTokenRefreshCron(
   env: WorkerEnv,
@@ -405,12 +477,7 @@ export async function handleTokenRefreshCron(
     const refreshResult = await dispatchTokenRefresh(conn.platform, creds, fetchFn);
 
     if (refreshResult.success && refreshResult.accessToken && refreshResult.tokenExpiresAt) {
-      const updatedCredentials = {
-        ...creds,
-        accessToken: refreshResult.accessToken,
-        ...(refreshResult.refreshToken ? { refreshToken: refreshResult.refreshToken } : {}),
-        ...(conn.platform === 'meta' ? { pageAccessToken: refreshResult.accessToken } : {}),
-      };
+      const updatedCredentials = buildUpdatedCredentials(conn.platform, creds, refreshResult);
 
       const { error: updateErr } = await db
         .from('channel_connections')

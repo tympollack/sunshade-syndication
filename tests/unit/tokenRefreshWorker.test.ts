@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SocialPlatform } from '@digitalcanopy/syndication-core';
 import {
+  buildUpdatedCredentials,
   handleTokenRefreshCron,
   refreshBlueskySession,
   refreshLinkedInOAuth,
@@ -88,20 +89,29 @@ describe('tokenRefreshWorker', () => {
       expect(result.tokenExpiresAt).toBeDefined();
     });
 
-    it('successfully exchanges Meta Graph access tokens for long-lived tokens', async () => {
-      const mockFetch: FetchFunction = vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            access_token: 'long-lived-meta-token-xyz',
-            expires_in: 5184000,
-          }),
-          { status: 200 },
-        ),
-      );
+    it('exchanges Meta tokens via POST body without secrets in URL', async () => {
+      let capturedUrl = '';
+      let capturedMethod = '';
+      let capturedBody = '';
+
+      const mockFetch: FetchFunction = vi.fn().mockImplementation((url, init) => {
+        capturedUrl = url.toString();
+        capturedMethod = init?.method ?? 'GET';
+        capturedBody = String(init?.body ?? '');
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: 'long-lived-meta-token-xyz',
+              expires_in: 5184000,
+            }),
+            { status: 200 },
+          ),
+        );
+      });
 
       const result = await refreshMetaOAuth(
         {
-          pageAccessToken: 'short-lived-page-token',
+          userAccessToken: 'short-lived-user-token',
           clientId: 'meta-client-id',
           clientSecret: 'meta-client-secret',
         },
@@ -110,6 +120,11 @@ describe('tokenRefreshWorker', () => {
 
       expect(result.success).toBe(true);
       expect(result.accessToken).toBe('long-lived-meta-token-xyz');
+      // Verify POST method and body
+      expect(capturedMethod).toBe('POST');
+      expect(capturedUrl).not.toContain('client_secret');
+      expect(capturedBody).toContain('client_secret=meta-client-secret');
+      expect(capturedBody).toContain('fb_exchange_token=short-lived-user-token');
     });
 
     it('successfully refreshes Bluesky AT Protocol session', async () => {
@@ -137,8 +152,47 @@ describe('tokenRefreshWorker', () => {
     });
   });
 
+  describe('buildUpdatedCredentials platform mapping', () => {
+    it('maps Bluesky credentials to accessJwt and refreshJwt', () => {
+      const existing = { service: 'https://bsky.social', accessJwt: 'old-access', refreshJwt: 'old-refresh' };
+      const updated = buildUpdatedCredentials('bluesky', existing, {
+        success: true,
+        accessToken: 'new-access',
+        refreshToken: 'new-refresh',
+      });
+
+      expect(updated['accessJwt']).toBe('new-access');
+      expect(updated['refreshJwt']).toBe('new-refresh');
+      expect(updated['service']).toBe('https://bsky.social');
+    });
+
+    it('maps X credentials to bearerToken consumed by XTwitterAdapter', () => {
+      const existing = { bearerToken: 'old-bearer', refreshToken: 'old-refresh' };
+      const updated = buildUpdatedCredentials('x', existing, {
+        success: true,
+        accessToken: 'new-bearer',
+        refreshToken: 'new-refresh',
+      });
+
+      expect(updated['bearerToken']).toBe('new-bearer');
+      expect(updated['accessToken']).toBe('new-bearer');
+    });
+
+    it('maps Meta credentials to pageAccessToken consumed by MetaGraphAdapter', () => {
+      const existing = { pageAccessToken: 'old-page', userAccessToken: 'old-user' };
+      const updated = buildUpdatedCredentials('meta', existing, {
+        success: true,
+        accessToken: 'new-user',
+        pageAccessToken: 'new-page',
+      });
+
+      expect(updated['userAccessToken']).toBe('new-user');
+      expect(updated['pageAccessToken']).toBe('new-page');
+    });
+  });
+
   describe('handleTokenRefreshCron scanner & lifecycle transitions', () => {
-    it('scans expiring channels within 7-day horizon and isolates failures', async () => {
+    it('scans expiring channels within horizon, persists consumer-ready keys, and isolates failures', async () => {
       const now = new Date('2026-11-12T12:00:00.000Z');
 
       const mockConnections: ChannelConnectionRecord[] = [
@@ -148,7 +202,7 @@ describe('tokenRefreshWorker', () => {
           platform: 'linkedin',
           account_handle: 'sunshade-systems',
           status: 'active',
-          token_expires_at: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString(), // expires in 3 days (within 7d)
+          token_expires_at: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString(),
           encrypted_credentials: {
             refreshToken: 'valid-li-refresh',
             clientId: 'cid',
@@ -161,36 +215,35 @@ describe('tokenRefreshWorker', () => {
           platform: 'x',
           account_handle: '@SunShadeSystems',
           status: 'active',
-          token_expires_at: new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000).toISOString(), // expires in 1 day
+          token_expires_at: new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000).toISOString(),
           encrypted_credentials: {
             refreshToken: 'revoked-x-refresh',
             clientId: 'x-cid',
           },
         },
         {
-          id: 'c-meta-1',
+          id: 'c-bsky-1',
           tenant_id: 't-1',
-          platform: 'meta',
-          account_handle: 'SunShadeFacebook',
+          platform: 'bluesky',
+          account_handle: 'sunshade.bsky.social',
           status: 'active',
-          token_expires_at: new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000).toISOString(), // expires in 5 days
+          token_expires_at: new Date(now.getTime() + 1 * 60 * 60 * 1000).toISOString(), // expires in 1 hr
           encrypted_credentials: {
-            pageAccessToken: 'valid-meta-token',
-            clientId: 'meta-cid',
-            clientSecret: 'meta-csec',
+            service: 'https://bsky.social',
+            accessJwt: 'old-bsky-access',
+            refreshJwt: 'valid-bsky-refresh',
           },
         },
       ];
 
-      const updatedRecords: Array<{ id: string; status?: string; token_expires_at?: string }> = [];
+      const updatedRecords: Array<{ id: string; status?: string; token_expires_at?: string; encrypted_credentials?: Record<string, unknown> }> = [];
 
-      // Mock Supabase DB Client
       const mockDb: any = {
         from: (table: string) => {
           expect(table).toBe('channel_connections');
           return {
             select: () => ({
-              eq: (field: string, val: string) => ({
+              eq: () => ({
                 not: () => ({
                   lte: () => Promise.resolve({ data: mockConnections, error: null }),
                 }),
@@ -198,7 +251,7 @@ describe('tokenRefreshWorker', () => {
             }),
             update: (payload: Record<string, unknown>) => ({
               eq: (fieldA: string, id: string) => ({
-                eq: (fieldB: string, tenantId: string) => {
+                eq: () => {
                   updatedRecords.push({ id, ...payload });
                   return Promise.resolve({ error: null });
                 },
@@ -208,10 +261,6 @@ describe('tokenRefreshWorker', () => {
         },
       };
 
-      // Mock Fetch function:
-      // LinkedIn -> 200 OK
-      // X -> 401 Unauthorized (permanent failure)
-      // Meta -> 200 OK
       const mockFetch: FetchFunction = vi.fn().mockImplementation((url: string | URL | Request) => {
         const urlStr = url.toString();
         if (urlStr.includes('linkedin.com')) {
@@ -230,12 +279,12 @@ describe('tokenRefreshWorker', () => {
             new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 401 }),
           );
         }
-        if (urlStr.includes('facebook.com')) {
+        if (urlStr.includes('bsky.social')) {
           return Promise.resolve(
             new Response(
               JSON.stringify({
-                access_token: 'refreshed-meta-token',
-                expires_in: 5184000,
+                accessJwt: 'refreshed-bsky-access-jwt',
+                refreshJwt: 'refreshed-bsky-refresh-jwt',
               }),
               { status: 200 },
             ),
@@ -267,9 +316,11 @@ describe('tokenRefreshWorker', () => {
       const xUpdate = updatedRecords.find((r) => r.id === 'c-x-revoked');
       expect(xUpdate?.status).toBe('expired');
 
-      // Verify Meta succeeded despite X failing (fault isolation)
-      const metaUpdate = updatedRecords.find((r) => r.id === 'c-meta-1');
-      expect(metaUpdate?.status).toBe('active');
+      // Verify Bluesky was refreshed and correctly updated accessJwt & refreshJwt
+      const bskyUpdate = updatedRecords.find((r) => r.id === 'c-bsky-1');
+      expect(bskyUpdate?.status).toBe('active');
+      expect(bskyUpdate?.encrypted_credentials?.['accessJwt']).toBe('refreshed-bsky-access-jwt');
+      expect(bskyUpdate?.encrypted_credentials?.['refreshJwt']).toBe('refreshed-bsky-refresh-jwt');
     });
   });
 });

@@ -33,7 +33,11 @@ const worker: ExportedHandler<WorkerEnv, ChannelDispatchJob> = {
       return;
     }
 
-    await handleRssCron(env);
+    // Run 30-minute Substack RSS poller alongside short-lived (2-hr) token refresh cycle
+    await Promise.allSettled([
+      handleRssCron(env),
+      handleTokenRefreshCron(env, { horizonMs: 2 * 60 * 60 * 1000 }),
+    ]);
   },
 
   async queue(batch: MessageBatch<ChannelDispatchJob>, env: WorkerEnv): Promise<void> {

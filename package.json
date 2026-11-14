@@ -9,8 +9,11 @@
   ],
   "scripts": {
     "dev": "npm --workspace=apps/syndication-worker run dev",
+    "prebuild": "npm --workspace=packages/syndication-core run build",
     "build": "npm --workspaces run build",
+    "pretypecheck": "npm --workspace=packages/syndication-core run build",
     "typecheck": "npm --workspaces run typecheck",
+    "pretest": "npm --workspace=packages/syndication-core run build",
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:watch": "vitest",

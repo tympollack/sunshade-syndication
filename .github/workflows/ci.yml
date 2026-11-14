@@ -33,6 +33,9 @@ jobs:
             exit 1
           fi
 
+      - name: Build core package
+        run: npm --workspace=packages/syndication-core run build
+
       - name: Typecheck workspaces
         run: npm run typecheck
 

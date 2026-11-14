@@ -56,26 +56,84 @@ export async function getActiveChannelConnections(
 }
 
 /**
- * Checks if an RSS item GUID has already been processed in feed_history.
+ * Checks if an RSS item GUID has already been processed in feed_history or publication_posts.
  */
 export async function isFeedItemProcessed(
   db: SyndicationDbClient,
   tenantId: string,
   itemGuid: string,
+  feedUrl?: string,
 ): Promise<boolean> {
-  const { data, error } = await db
+  let query = db
     .from('feed_history')
     .select('id')
     .eq('tenant_id', tenantId)
-    .eq('item_guid', itemGuid)
-    .maybeSingle();
+    .eq('item_guid', itemGuid);
+
+  if (feedUrl) {
+    query = query.eq('feed_url', feedUrl);
+  }
+
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
     logger.error('Failed to check feed_history item', { tenantId, itemGuid, error: error.message });
     throw new Error(`Database error in isFeedItemProcessed: ${error.message}`);
   }
 
-  return data !== null;
+  if (data !== null) {
+    return true;
+  }
+
+  // Also check publication_posts for source_type = 'substack_rss' and source_ref_id = itemGuid
+  const { data: postData, error: postError } = await db
+    .from('publication_posts')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('source_type', 'substack_rss')
+    .eq('source_ref_id', itemGuid)
+    .maybeSingle();
+
+  if (postError) {
+    logger.error('Failed to check publication_posts for RSS item', {
+      tenantId,
+      itemGuid,
+      error: postError.message,
+    });
+    throw new Error(`Database error in isFeedItemProcessed (publication_posts): ${postError.message}`);
+  }
+
+  return postData !== null;
+}
+
+/**
+ * Queries a publication post by source type and source reference ID.
+ */
+export async function getPublicationPostBySource(
+  db: SyndicationDbClient,
+  tenantId: string,
+  sourceType: string,
+  sourceRefId: string,
+): Promise<PublicationPost | null> {
+  const { data, error } = await db
+    .from('publication_posts')
+    .select('*')
+    .eq('tenant_id', tenantId)
+    .eq('source_type', sourceType)
+    .eq('source_ref_id', sourceRefId)
+    .maybeSingle();
+
+  if (error) {
+    logger.error('Failed to query publication post by source', {
+      tenantId,
+      sourceType,
+      sourceRefId,
+      error: error.message,
+    });
+    throw new Error(`Database error in getPublicationPostBySource: ${error.message}`);
+  }
+
+  return (data as PublicationPost) ?? null;
 }
 
 /**

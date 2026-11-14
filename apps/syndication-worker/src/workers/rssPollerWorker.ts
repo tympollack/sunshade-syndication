@@ -9,6 +9,7 @@ import { LinksClient } from '../lib/linksClient.js';
 import {
   createPublicationPost,
   getActiveChannelConnections,
+  getPublicationPostBySource,
   getSyndicationDbClient,
   isFeedItemProcessed,
   recordFeedHistory,
@@ -43,12 +44,23 @@ export interface RssPollerSummary {
 function extractTag(block: string, tag: string): string {
   const match = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i'));
   const raw = match?.[1] ?? '';
-  return raw.replace(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/i, '$1').trim();
+  const cdataMatch = raw.match(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/i);
+  if (cdataMatch) {
+    return (cdataMatch[1] ?? '').trim();
+  }
+  // Unescape standard XML entities for text nodes outside CDATA
+  return raw
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim();
 }
 
 /**
  * Minimal deterministic RSS 2.0 XML parser for Substack feeds.
- * Correctly extracts CDATA sections, HTML entity-encoded descriptions,
+ * Correctly extracts CDATA sections, entity-encoded descriptions,
  * enclosures / media thumbnails, and RFC-822 / ISO-8601 publication timestamps.
  */
 export function parseRssFeedXml(xml: string): ParsedRssItem[] {
@@ -61,8 +73,10 @@ export function parseRssFeedXml(xml: string): ParsedRssItem[] {
     const title = normalizeCopy(rawTitle);
     const link = extractTag(block, 'link');
     const guid = extractTag(block, 'guid') || link;
+
     const rawDescription = extractTag(block, 'description') || extractTag(block, 'content:encoded');
     const description = normalizeCopy(rawDescription);
+
     const rawDate = extractTag(block, 'pubDate');
     const parsedDate = rawDate ? new Date(rawDate) : new Date();
     const pubDate = Number.isNaN(parsedDate.getTime())
@@ -89,9 +103,9 @@ export function parseRssFeedXml(xml: string): ParsedRssItem[] {
 
 /**
  * 30-minute Substack RSS cron poller.
- * Scans configured Substack feeds, deduplicates against `syndication.feed_history`
- * and `syndication.publication_posts`, mints platform-attributed shortlinks via
- * `links.sunshade.icu/api/v1/links`, and broadcasts to active channels.
+ * Scans configured Substack feeds, deduplicates against `syndication.feed_history`,
+ * mints platform-attributed shortlinks via `links.sunshade.icu/api/v1/links`,
+ * and broadcasts to active channels.
  */
 export async function handleRssCron(
   env: WorkerEnv,
@@ -148,54 +162,48 @@ export async function handleRssCron(
           continue;
         }
 
-        // Mint post canonical shortlink via links service (falls back safely if unavailable)
-        let postShortUrl: string | undefined;
-        try {
-          const postShortLink = await linksClient.createShortLink({
-            destinationUrl: item.link,
-            tenantId,
-            title: item.title,
-            utmCampaign: 'substack_rss',
-          });
-          if (postShortLink?.shortUrl) {
-            postShortUrl = postShortLink.shortUrl;
-            summary.shortlinksMinted += 1;
+        // Reuse existing post if previous run failed between post creation and feed_history recording
+        let post = await getPublicationPostBySource(db, tenantId, 'substack_rss', item.guid);
+
+        if (!post) {
+          // Mint post canonical shortlink via links service (falls back safely if unavailable)
+          let postShortUrl: string | undefined;
+          try {
+            const postShortLink = await linksClient.createShortLink({
+              destinationUrl: item.link,
+              tenantId,
+              title: item.title,
+              utmCampaign: 'substack_rss',
+            });
+            if (postShortLink?.shortUrl) {
+              postShortUrl = postShortLink.shortUrl;
+              summary.shortlinksMinted += 1;
+            }
+          } catch (err) {
+            logger.warn('Failed to mint post-level shortlink', {
+              itemGuid: item.guid,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
-        } catch (err) {
-          logger.warn('Failed to mint post-level shortlink', {
-            itemGuid: item.guid,
-            error: err instanceof Error ? err.message : String(err),
+
+          post = await createPublicationPost(db, {
+            tenant_id: tenantId,
+            source_type: 'substack_rss',
+            source_ref_id: item.guid,
+            title: item.title,
+            body: item.description || item.title,
+            canonical_url: item.link,
+            short_url: postShortUrl,
+            media_urls: item.enclosureUrl ? [item.enclosureUrl] : [],
+            status: 'queued',
           });
         }
-
-        const post = await createPublicationPost(db, {
-          tenant_id: tenantId,
-          source_type: 'substack_rss',
-          source_ref_id: item.guid,
-          title: item.title,
-          body: item.description || item.title,
-          canonical_url: item.link,
-          short_url: postShortUrl,
-          media_urls: item.enclosureUrl ? [item.enclosureUrl] : [],
-          status: 'queued',
-        });
-
-        await recordFeedHistory(db, {
-          tenant_id: tenantId,
-          feed_url: feedUrl,
-          item_guid: item.guid,
-          item_url: item.link,
-          title: item.title,
-          published_at: item.pubDate,
-          publication_post_id: post.id,
-        });
-        summary.itemsProcessed += 1;
 
         if (env.SYNDICATION_QUEUE && channels.length > 0) {
           const queueMessages: Array<{ body: ChannelDispatchJob }> = [];
 
           for (const ch of channels) {
-            let channelShortUrl = postShortUrl;
+            let channelShortUrl = post.short_url ?? undefined;
             try {
               const channelShortLink = await linksClient.createShortLink({
                 destinationUrl: item.link,
@@ -248,6 +256,18 @@ export async function handleRssCron(
           await env.SYNDICATION_QUEUE.sendBatch(queueMessages);
           summary.postsQueued += queueMessages.length;
         }
+
+        // Record feed history after post creation and queueing succeed
+        await recordFeedHistory(db, {
+          tenant_id: tenantId,
+          feed_url: feedUrl,
+          item_guid: item.guid,
+          item_url: item.link,
+          title: item.title,
+          published_at: item.pubDate,
+          publication_post_id: post.id,
+        });
+        summary.itemsProcessed += 1;
       }
     } catch (err) {
       logger.error('Error polling RSS feed', {

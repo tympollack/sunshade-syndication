@@ -12,6 +12,7 @@ import {
   getActiveChannelConnections,
   getPublicationPostBySource,
   getSyndicationDbClient,
+  recordChannelDispatches,
   type SyndicationDbClient,
 } from '../lib/supabase.js';
 
@@ -89,7 +90,7 @@ export async function handleTrackerWebhook(
   const db = options.db ?? getSyndicationDbClient(env);
   const linksClient = options.linksClient ?? new LinksClient(env);
 
-  // Idempotency check: prevent duplicate broadcast enqueues if Tracker retries delivery
+  // Idempotency check: if post exists, verify if channel dispatches were already successfully enqueued
   const existingPost = await getPublicationPostBySource(
     db,
     payload.tenant_id,
@@ -98,49 +99,62 @@ export async function handleTrackerWebhook(
   );
 
   if (existingPost) {
-    logger.info('Tracker webhook item already processed; skipping duplicate broadcast', {
-      postId: existingPost.id,
-      externalRefId: payload.data.external_ref_id,
-    });
-    return new Response(
-      JSON.stringify({
-        accepted: true,
-        duplicate: true,
+    const { data: existingDispatches } = await db
+      .from('channel_dispatches')
+      .select('id')
+      .eq('tenant_id', payload.tenant_id)
+      .eq('post_id', existingPost.id);
+
+    if (existingDispatches && existingDispatches.length > 0) {
+      logger.info('Tracker webhook item already processed and dispatched; skipping duplicate broadcast', {
         postId: existingPost.id,
-        message: 'Item already syndicated',
-      }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    );
+        externalRefId: payload.data.external_ref_id,
+        dispatchCount: existingDispatches.length,
+      });
+      return new Response(
+        JSON.stringify({
+          accepted: true,
+          duplicate: true,
+          postId: existingPost.id,
+          message: 'Item already syndicated',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
   }
 
-  // Mint canonical shortlink for the post
-  let postShortUrl: string | undefined;
-  try {
-    const shortLinkResult = await linksClient.createShortLink({
-      destinationUrl: payload.data.canonical_url,
-      tenantId: payload.tenant_id,
+  // Reuse existing post if previous run failed before dispatching, or create new post
+  let post = existingPost;
+  if (!post) {
+    // Mint canonical shortlink for the post
+    let postShortUrl: string | undefined;
+    try {
+      const shortLinkResult = await linksClient.createShortLink({
+        destinationUrl: payload.data.canonical_url,
+        tenantId: payload.tenant_id,
+        title: payload.data.title,
+        utmCampaign: payload.data.project_key,
+      });
+      postShortUrl = shortLinkResult?.shortUrl;
+    } catch (err) {
+      logger.warn('Failed to mint post-level shortlink for tracker webhook; falling back', {
+        externalRefId: payload.data.external_ref_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    post = await createPublicationPost(db, {
+      tenant_id: payload.tenant_id,
+      source_type: 'tracker',
+      source_ref_id: payload.data.external_ref_id,
       title: payload.data.title,
-      utmCampaign: payload.data.project_key,
-    });
-    postShortUrl = shortLinkResult?.shortUrl;
-  } catch (err) {
-    logger.warn('Failed to mint post-level shortlink for tracker webhook; falling back', {
-      externalRefId: payload.data.external_ref_id,
-      error: err instanceof Error ? err.message : String(err),
+      body: payload.data.summary ?? payload.data.title,
+      canonical_url: payload.data.canonical_url,
+      short_url: postShortUrl,
+      media_urls: payload.data.media_urls,
+      status: 'queued',
     });
   }
-
-  const post = await createPublicationPost(db, {
-    tenant_id: payload.tenant_id,
-    source_type: 'tracker',
-    source_ref_id: payload.data.external_ref_id,
-    title: payload.data.title,
-    body: payload.data.summary ?? payload.data.title,
-    canonical_url: payload.data.canonical_url,
-    short_url: postShortUrl,
-    media_urls: payload.data.media_urls,
-    status: 'queued',
-  });
 
   const channels = await getActiveChannelConnections(db, payload.tenant_id);
   const targetChannels = payload.data.target_platforms
@@ -151,7 +165,7 @@ export async function handleTrackerWebhook(
     const queueMessages: Array<{ body: ChannelDispatchJob }> = [];
 
     for (const channel of targetChannels) {
-      let channelShortUrl = postShortUrl;
+      let channelShortUrl = post.short_url ?? undefined;
       try {
         const channelShortLink = await linksClient.createShortLink({
           destinationUrl: payload.data.canonical_url,
@@ -201,6 +215,21 @@ export async function handleTrackerWebhook(
     }
 
     await env.SYNDICATION_QUEUE.sendBatch(queueMessages);
+
+    // Record pending dispatches in channel_dispatches to protect against duplicate retry submission
+    await recordChannelDispatches(
+      db,
+      queueMessages.map((msg) => ({
+        id: msg.body.dispatch_id,
+        tenant_id: payload.tenant_id,
+        post_id: post!.id,
+        channel_connection_id: msg.body.channel_connection_id,
+        platform: msg.body.platform,
+        status: 'pending',
+        idempotency_key: msg.body.idempotency_key,
+        attempt: 1,
+      })),
+    );
   }
 
   logger.info('Queued tracker item for syndication', {

@@ -85,6 +85,20 @@ describe('rssPollerWorker', () => {
       const items = parseRssFeedXml(xml);
       expect(items).toHaveLength(0);
     });
+
+    it('preserves escaped comparison operators and generic types without deleting text', () => {
+      const xml = `<rss><channel><item>
+        <title>&lt;T&gt;</title>
+        <link>https://sunshade.substack.com/p/generic-type</link>
+        <guid>guid-generic-1</guid>
+        <description>Latency &amp;lt; 10ms and throughput &amp;gt; 5 req/s</description>
+      </item></channel></rss>`;
+
+      const items = parseRssFeedXml(xml);
+      expect(items).toHaveLength(1);
+      expect(items[0]!.title).toBe('<T>');
+      expect(items[0]!.description).toBe('Latency < 10ms and throughput > 5 req/s');
+    });
   });
 
   describe('handleRssCron lifecycle', () => {
@@ -364,6 +378,127 @@ describe('rssPollerWorker', () => {
       expect(enqueuedBatches[0][0].body.payload.linkUrl).toContain(
         'https://sunshade.substack.com/p/fallback-item?utm_source=bluesky',
       );
+    });
+
+    it('resumes cleanly and records feed_history if previous run failed after creating publication_post', async () => {
+      const enqueuedBatches: any[] = [];
+      const insertedFeedHistory: any[] = [];
+      let postCreated = false;
+
+      const mockDb = {
+        from: (table: string) => {
+          if (table === 'feed_history') {
+            return {
+              select: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    eq: () => ({
+                      maybeSingle: async () => ({ data: null, error: null }),
+                    }),
+                    maybeSingle: async () => ({ data: null, error: null }),
+                  }),
+                }),
+              }),
+              insert: (entry: any) => ({
+                select: () => ({
+                  single: async () => {
+                    insertedFeedHistory.push(entry);
+                    return { data: { id: 'feed-hist-recovered', ...entry }, error: null };
+                  },
+                }),
+              }),
+            };
+          }
+
+          if (table === 'publication_posts') {
+            return {
+              select: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    eq: () => ({
+                      maybeSingle: async () => ({
+                        data: {
+                          id: 'recovered-post-id',
+                          tenant_id: mockTenantId,
+                          source_type: 'substack_rss',
+                          source_ref_id: 'guid-recovered-1',
+                          title: 'Recovered Article',
+                          body: 'Recovered Body',
+                          canonical_url: 'https://sunshade.substack.com/p/recovered',
+                          short_url: 'https://links-stag.sunshade.icu/s/rec',
+                          status: 'queued',
+                        },
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              }),
+              insert: () => {
+                postCreated = true;
+                throw new Error('Should not attempt insert when post already exists');
+              },
+            };
+          }
+
+          if (table === 'channel_connections') {
+            return {
+              select: () => ({
+                eq: () => ({
+                  eq: () =>
+                    Promise.resolve({
+                      data: [
+                        {
+                          id: 'conn-bsky-1',
+                          tenant_id: mockTenantId,
+                          platform: 'bluesky',
+                          account_handle: 'sunshade.bsky.social',
+                          status: 'active',
+                        },
+                      ],
+                      error: null,
+                    }),
+                }),
+              }),
+            };
+          }
+
+          throw new Error(`Unexpected table ${table}`);
+        },
+      } as unknown as SyndicationDbClient;
+
+      const singleItemXml = `<rss><channel><item>
+        <title>Recovered Article</title>
+        <link>https://sunshade.substack.com/p/recovered</link>
+        <guid>guid-recovered-1</guid>
+      </item></channel></rss>`;
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(singleItemXml, { status: 200, headers: { 'Content-Type': 'application/xml' } }),
+      );
+
+      const mockQueue = {
+        sendBatch: vi.fn().mockImplementation(async (batch) => {
+          enqueuedBatches.push(batch);
+        }),
+      } as unknown as Queue<any>;
+
+      const env: WorkerEnv = {
+        SUBSTACK_FEED_URLS: 'https://sunshade.substack.com/feed',
+        SYNDICATION_QUEUE: mockQueue,
+      };
+
+      const summary = await handleRssCron(env, {
+        db: mockDb,
+        fetch: mockFetch,
+      });
+
+      expect(summary.itemsProcessed).toBe(1);
+      expect(postCreated).toBe(false);
+      expect(enqueuedBatches).toHaveLength(1);
+      expect(enqueuedBatches[0][0].body.post_id).toBe('recovered-post-id');
+      expect(insertedFeedHistory).toHaveLength(1);
+      expect(insertedFeedHistory[0].publication_post_id).toBe('recovered-post-id');
     });
   });
 });

@@ -56,7 +56,9 @@ export async function getActiveChannelConnections(
 }
 
 /**
- * Checks if an RSS item GUID has already been processed in feed_history or publication_posts.
+ * Checks if an RSS item GUID has already been processed in feed_history.
+ * Note: Does not check publication_posts so that failures occurring after
+ * post creation but before feed_history recording can be safely retried.
  */
 export async function isFeedItemProcessed(
   db: SyndicationDbClient,
@@ -81,29 +83,7 @@ export async function isFeedItemProcessed(
     throw new Error(`Database error in isFeedItemProcessed: ${error.message}`);
   }
 
-  if (data !== null) {
-    return true;
-  }
-
-  // Also check publication_posts for source_type = 'substack_rss' and source_ref_id = itemGuid
-  const { data: postData, error: postError } = await db
-    .from('publication_posts')
-    .select('id')
-    .eq('tenant_id', tenantId)
-    .eq('source_type', 'substack_rss')
-    .eq('source_ref_id', itemGuid)
-    .maybeSingle();
-
-  if (postError) {
-    logger.error('Failed to check publication_posts for RSS item', {
-      tenantId,
-      itemGuid,
-      error: postError.message,
-    });
-    throw new Error(`Database error in isFeedItemProcessed (publication_posts): ${postError.message}`);
-  }
-
-  return postData !== null;
+  return data !== null;
 }
 
 /**
@@ -206,4 +186,29 @@ export async function createPublicationPost(
   }
 
   return data as PublicationPost;
+}
+
+/**
+ * Inserts pending channel dispatch records in `syndication.channel_dispatches`.
+ */
+export async function recordChannelDispatches(
+  db: SyndicationDbClient,
+  dispatches: Array<{
+    id: string;
+    tenant_id: string;
+    post_id: string;
+    channel_connection_id?: string;
+    platform: string;
+    status: string;
+    idempotency_key: string;
+    attempt: number;
+  }>,
+): Promise<void> {
+  if (dispatches.length === 0) return;
+
+  const { error } = await db.from('channel_dispatches').insert(dispatches);
+  if (error) {
+    logger.error('Failed to insert channel_dispatches records', { error: error.message });
+    throw new Error(`Database error in recordChannelDispatches: ${error.message}`);
+  }
 }

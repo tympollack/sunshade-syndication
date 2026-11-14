@@ -120,8 +120,9 @@ describe('trackerWebhook', () => {
     expect(body.reason).toContain('Status is not syndicated');
   });
 
-  it('successfully creates publication post, mints links, and queues targeted channels', async () => {
+  it('successfully creates publication post, mints links, queues targeted channels, and records dispatches', async () => {
     const insertedPosts: any[] = [];
+    const insertedDispatches: any[] = [];
     const enqueuedBatches: any[] = [];
 
     const mockDb = {
@@ -185,61 +186,75 @@ describe('trackerWebhook', () => {
           };
         }
 
-          throw new Error(`Unexpected table ${table}`);
-        },
-      } as unknown as SyndicationDbClient;
+        if (table === 'channel_dispatches') {
+          return {
+            insert: async (rows: any[]) => {
+              insertedDispatches.push(...rows);
+              return { error: null };
+            },
+          };
+        }
 
-      const mockLinksClient = {
-        createShortLink: vi.fn().mockImplementation((params) => {
-          const suffix = params.utmSource ? `-${params.utmSource}` : '';
-          return Promise.resolve({
-            shortUrl: `https://links-stag.sunshade.icu/s/syn104${suffix}`,
-            slug: `syn104${suffix}`,
-            destinationUrl: params.destinationUrl,
-          });
-        }),
-      } as unknown as LinksClient;
+        throw new Error(`Unexpected table ${table}`);
+      },
+    } as unknown as SyndicationDbClient;
 
-      const mockQueue = {
-        sendBatch: vi.fn().mockImplementation(async (batch) => {
-          enqueuedBatches.push(batch);
-        }),
-      } as unknown as Queue<any>;
+    const mockLinksClient = {
+      createShortLink: vi.fn().mockImplementation((params) => {
+        const suffix = params.utmSource ? `-${params.utmSource}` : '';
+        return Promise.resolve({
+          shortUrl: `https://links-stag.sunshade.icu/s/syn104${suffix}`,
+          slug: `syn104${suffix}`,
+          destinationUrl: params.destinationUrl,
+        });
+      }),
+    } as unknown as LinksClient;
 
-      const env: WorkerEnv = {
-        TRACKER_WEBHOOK_SECRET: TEST_SECRET,
-        SYNDICATION_QUEUE: mockQueue,
-      };
+    const mockQueue = {
+      sendBatch: vi.fn().mockImplementation(async (batch) => {
+        enqueuedBatches.push(batch);
+      }),
+    } as unknown as Queue<any>;
 
-      const req = await createSignedRequest(VALID_PAYLOAD, TEST_SECRET);
-      const res = await handleTrackerWebhook(req, env, {
-        db: mockDb,
-        linksClient: mockLinksClient,
-      });
+    const env: WorkerEnv = {
+      TRACKER_WEBHOOK_SECRET: TEST_SECRET,
+      SYNDICATION_QUEUE: mockQueue,
+    };
 
-      expect(res.status).toBe(202);
-      const resBody = (await res.json()) as { accepted: boolean; postId: string; queuedChannels: number };
-      expect(resBody.accepted).toBe(true);
-      expect(resBody.postId).toBe('post-syn-104-uuid');
-      expect(resBody.queuedChannels).toBe(2); // Only bluesky and x (target_platforms filter)
+    const req = await createSignedRequest(VALID_PAYLOAD, TEST_SECRET);
+    const res = await handleTrackerWebhook(req, env, {
+      db: mockDb,
+      linksClient: mockLinksClient,
+    });
 
-      // Post verification
-      expect(insertedPosts).toHaveLength(1);
-      expect(insertedPosts[0]!.source_ref_id).toBe('SYN-104');
-      expect(insertedPosts[0]!.source_type).toBe('tracker');
-      expect(insertedPosts[0]!.short_url).toBe('https://links-stag.sunshade.icu/s/syn104');
+    expect(res.status).toBe(202);
+    const resBody = (await res.json()) as { accepted: boolean; postId: string; queuedChannels: number };
+    expect(resBody.accepted).toBe(true);
+    expect(resBody.postId).toBe('post-syn-104-uuid');
+    expect(resBody.queuedChannels).toBe(2); // Only bluesky and x (target_platforms filter)
 
-      // Queue verification
-      expect(enqueuedBatches).toHaveLength(1);
-      const jobs = enqueuedBatches[0];
-      expect(jobs).toHaveLength(2);
-      expect(jobs[0].body.platform).toBe('bluesky');
-      expect(jobs[0].body.payload.linkUrl).toBe('https://links-stag.sunshade.icu/s/syn104-bluesky');
-      expect(jobs[1].body.platform).toBe('x');
-      expect(jobs[1].body.payload.linkUrl).toBe('https://links-stag.sunshade.icu/s/syn104-x');
+    // Post verification
+    expect(insertedPosts).toHaveLength(1);
+    expect(insertedPosts[0]!.source_ref_id).toBe('SYN-104');
+    expect(insertedPosts[0]!.source_type).toBe('tracker');
+    expect(insertedPosts[0]!.short_url).toBe('https://links-stag.sunshade.icu/s/syn104');
+
+    // Queue verification
+    expect(enqueuedBatches).toHaveLength(1);
+    const jobs = enqueuedBatches[0];
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0].body.platform).toBe('bluesky');
+    expect(jobs[0].body.payload.linkUrl).toBe('https://links-stag.sunshade.icu/s/syn104-bluesky');
+    expect(jobs[1].body.platform).toBe('x');
+    expect(jobs[1].body.payload.linkUrl).toBe('https://links-stag.sunshade.icu/s/syn104-x');
+
+    // Channel dispatches recorded
+    expect(insertedDispatches).toHaveLength(2);
+    expect(insertedDispatches[0].post_id).toBe('post-syn-104-uuid');
+    expect(insertedDispatches[0].status).toBe('pending');
   });
 
-  it('deduplicates duplicate webhook deliveries idempotently without re-enqueuing', async () => {
+  it('deduplicates duplicate webhook deliveries idempotently when dispatches exist', async () => {
     const mockQueue = {
       sendBatch: vi.fn(),
     } as unknown as Queue<any>;
@@ -271,6 +286,20 @@ describe('trackerWebhook', () => {
             }),
           };
         }
+
+        if (table === 'channel_dispatches') {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: async () => ({
+                  data: [{ id: 'd1' }, { id: 'd2' }],
+                  error: null,
+                }),
+              }),
+            }),
+          };
+        }
+
         throw new Error(`Unexpected table ${table}`);
       },
     } as unknown as SyndicationDbClient;
@@ -289,5 +318,102 @@ describe('trackerWebhook', () => {
     expect(body.duplicate).toBe(true);
     expect(body.postId).toBe('existing-post-id');
     expect(mockQueue.sendBatch).not.toHaveBeenCalled();
+  });
+
+  it('resumes incomplete broadcasts if previous attempt created post but failed before dispatching', async () => {
+    const enqueuedBatches: any[] = [];
+    const insertedDispatches: any[] = [];
+
+    const mockDb = {
+      from: (table: string) => {
+        if (table === 'publication_posts') {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    maybeSingle: async () => ({
+                      data: {
+                        id: 'existing-unbroadcast-post',
+                        tenant_id: VALID_PAYLOAD.tenant_id,
+                        source_type: 'tracker',
+                        source_ref_id: 'SYN-104',
+                        title: VALID_PAYLOAD.data.title,
+                        body: VALID_PAYLOAD.data.summary,
+                        canonical_url: VALID_PAYLOAD.data.canonical_url,
+                        short_url: 'https://links-stag.sunshade.icu/s/syn104',
+                        status: 'queued',
+                      },
+                      error: null,
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+
+        if (table === 'channel_dispatches') {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: async () => ({
+                  data: [], // No dispatches recorded yet (previous attempt crashed)
+                  error: null,
+                }),
+              }),
+            }),
+            insert: async (rows: any[]) => {
+              insertedDispatches.push(...rows);
+              return { error: null };
+            },
+          };
+        }
+
+        if (table === 'channel_connections') {
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: () =>
+                  Promise.resolve({
+                    data: [
+                      {
+                        id: 'conn-bsky',
+                        tenant_id: VALID_PAYLOAD.tenant_id,
+                        platform: 'bluesky',
+                        account_handle: 'sunshade.bsky.social',
+                        status: 'active',
+                      },
+                    ] as ChannelConnection[],
+                    error: null,
+                  }),
+              }),
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      },
+    } as unknown as SyndicationDbClient;
+
+    const mockQueue = {
+      sendBatch: vi.fn().mockImplementation(async (batch) => {
+        enqueuedBatches.push(batch);
+      }),
+    } as unknown as Queue<any>;
+
+    const env: WorkerEnv = {
+      TRACKER_WEBHOOK_SECRET: TEST_SECRET,
+      SYNDICATION_QUEUE: mockQueue,
+    };
+
+    const req = await createSignedRequest(VALID_PAYLOAD, TEST_SECRET);
+    const res = await handleTrackerWebhook(req, env, { db: mockDb });
+
+    expect(res.status).toBe(202);
+    expect(enqueuedBatches).toHaveLength(1);
+    expect(enqueuedBatches[0][0].body.post_id).toBe('existing-unbroadcast-post');
+    expect(insertedDispatches).toHaveLength(1);
+    expect(insertedDispatches[0].post_id).toBe('existing-unbroadcast-post');
   });
 });

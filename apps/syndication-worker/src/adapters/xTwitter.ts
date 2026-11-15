@@ -29,6 +29,11 @@ export class InMemoryXQuotaTracker implements XQuotaTracker {
   }
 }
 
+/**
+ * Shared in-memory tracker across adapter instances within the same worker isolate.
+ */
+export const defaultSharedXQuotaTracker = new InMemoryXQuotaTracker();
+
 export interface XTwitterAdapterOptions {
   fetchFn?: typeof fetch;
   quotaTracker?: XQuotaTracker;
@@ -45,6 +50,17 @@ export function getCurrentYearMonthUtc(date = new Date()): string {
 }
 
 /**
+ * Calculates effective tweet length under X's rules where any recognized URL
+ * is counted as exactly 23 characters (t.co standard wrapping).
+ */
+export function calculateXEffectiveLength(text: string): number {
+  const urlRegex = /https?:\/\/[^\s]+/g;
+  const withoutUrls = text.replace(urlRegex, '');
+  const urlMatches = text.match(urlRegex) ?? [];
+  return withoutUrls.length + urlMatches.length * 23;
+}
+
+/**
  * X (Twitter) API v2 outbound adapter.
  * Supports single tweets and threaded chunk dispatches with in_reply_to_tweet_id chaining,
  * 280-character boundary enforcement, and 1,500/mo Free Tier rate budget tracking.
@@ -57,7 +73,7 @@ export class XTwitterAdapter implements SocialAdapter {
 
   constructor(options: XTwitterAdapterOptions = {}) {
     this.fetchFn = options.fetchFn ?? globalThis.fetch;
-    this.quotaTracker = options.quotaTracker ?? new InMemoryXQuotaTracker();
+    this.quotaTracker = options.quotaTracker ?? defaultSharedXQuotaTracker;
     this.defaultMonthlyQuota = options.monthlyQuota ?? X_FREE_TIER_MONTHLY_QUOTA;
   }
 
@@ -76,27 +92,33 @@ export class XTwitterAdapter implements SocialAdapter {
     let chunks: string[];
     if (request.threadChunks && request.threadChunks.length > 0) {
       chunks = request.threadChunks;
-    } else if (request.text.length > X_MAX_TWEET_CHARS) {
-      const threadResult = splitIntoXThread(request.text, { shortUrl: request.linkUrl });
-      chunks = threadResult.chunks.length > 0 ? threadResult.chunks : [request.text];
     } else {
-      const singleText = request.linkUrl ? `${request.text} ${request.linkUrl}` : request.text;
-      if (singleText.length <= X_MAX_TWEET_CHARS) {
-        chunks = [singleText];
+      const threadResult = splitIntoXThread(request.text, { shortUrl: request.linkUrl });
+      if (threadResult.chunks.length <= 1) {
+        const singleText = threadResult.anchorTweetText || request.text;
+        if (calculateXEffectiveLength(singleText) <= X_MAX_TWEET_CHARS) {
+          chunks = [singleText];
+        } else {
+          chunks =
+            threadResult.chunks.length > 0
+              ? [threadResult.anchorTweetText, ...threadResult.chunks.slice(1)]
+              : [singleText];
+        }
       } else {
-        const threadResult = splitIntoXThread(request.text, { shortUrl: request.linkUrl });
-        chunks = threadResult.chunks.length > 0 ? threadResult.chunks : [request.text];
+        // Multi-tweet thread: anchorTweetText contains chunk 0 + shortUrl
+        chunks = [threadResult.anchorTweetText, ...threadResult.chunks.slice(1)];
       }
     }
 
-    // Validate that every chunk fits within the 280-char limit
+    // Validate that every chunk fits within the 280-char effective limit
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
-      if (chunk.length > X_MAX_TWEET_CHARS) {
+      const effectiveLength = calculateXEffectiveLength(chunk);
+      if (effectiveLength > X_MAX_TWEET_CHARS) {
         return {
           success: false,
           retryable: false,
-          error: `Tweet chunk at index ${i} exceeds ${X_MAX_TWEET_CHARS} characters (got ${chunk.length} chars).`,
+          error: `Tweet chunk at index ${i} exceeds ${X_MAX_TWEET_CHARS} characters (effective length: ${effectiveLength}).`,
         };
       }
     }
@@ -104,10 +126,12 @@ export class XTwitterAdapter implements SocialAdapter {
     const currentYearMonth = getCurrentYearMonthUtc();
 
     // 2. 1,500/mo Free Tier Quota Guard
-    let currentUsage = await quotaTracker.getMonthlyTweetCount(request.tenantId, currentYearMonth);
-    if (typeof request.credentials?.['currentMonthlyUsage'] === 'number') {
-      currentUsage = Math.max(currentUsage, Number(request.credentials['currentMonthlyUsage']));
-    }
+    const trackedUsage = await quotaTracker.getMonthlyTweetCount(request.tenantId, currentYearMonth);
+    const baselineUsage =
+      typeof request.credentials?.['currentMonthlyUsage'] === 'number'
+        ? Number(request.credentials['currentMonthlyUsage'])
+        : 0;
+    const currentUsage = trackedUsage + baselineUsage;
 
     if (currentUsage + chunks.length > monthlyQuota) {
       return {
@@ -131,11 +155,12 @@ export class XTwitterAdapter implements SocialAdapter {
       };
     }
 
+    let rootTweetId: string | undefined;
+    let lastTweetId: string | undefined;
+    let publishedCount = 0;
+
     try {
       const token = String(request.credentials['bearerToken']);
-      let rootTweetId: string | undefined;
-      let lastTweetId: string | undefined;
-      let publishedCount = 0;
 
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i]!;
@@ -146,7 +171,11 @@ export class XTwitterAdapter implements SocialAdapter {
         }
 
         // Attach media IDs to anchor tweet if provided
-        if (i === 0 && Array.isArray(request.credentials['mediaIds']) && request.credentials['mediaIds'].length > 0) {
+        if (
+          i === 0 &&
+          Array.isArray(request.credentials['mediaIds']) &&
+          request.credentials['mediaIds'].length > 0
+        ) {
           payload['media'] = { media_ids: request.credentials['mediaIds'] };
         }
 
@@ -193,8 +222,12 @@ export class XTwitterAdapter implements SocialAdapter {
         retryable: false,
       };
     } catch (err) {
+      if (publishedCount > 0) {
+        await quotaTracker.recordTweetsPublished(request.tenantId, currentYearMonth, publishedCount);
+      }
       return {
         success: false,
+        platformPostId: rootTweetId,
         retryable: true,
         error: err instanceof Error ? err.message : String(err),
       };

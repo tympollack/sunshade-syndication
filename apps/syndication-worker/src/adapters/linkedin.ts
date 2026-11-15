@@ -103,6 +103,7 @@ export class LinkedInAdapter implements SocialAdapter {
           // Register upload asset with LinkedIn
           const registerPayload = {
             registerUploadRequest: {
+              supportedUploadMechanism: ['SYNCHRONOUS_UPLOAD'],
               recipes: ['urn:li:digitalmediaRecipe:feedshare-image'],
               owner: authorUrn,
               serviceRelationships: [
@@ -162,6 +163,7 @@ export class LinkedInAdapter implements SocialAdapter {
           // Upload image binary payload to uploadUrl
           const uploadHeaders: Record<string, string> = {
             'Content-Type': contentType,
+            Authorization: `Bearer ${accessToken}`,
             ...(uploadHttpRequest.headers ?? {}),
           };
 

@@ -140,6 +140,7 @@ export class MetaGraphAdapter implements SocialAdapter {
           attachedMedia.push({ media_fbid: photoData.id });
         }
 
+        params.delete('link');
         params.set('attached_media', JSON.stringify(attachedMedia));
       }
 

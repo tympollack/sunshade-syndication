@@ -125,6 +125,10 @@ describe('LinkedInAdapter', () => {
       // 3. Binary PUT
       if (url === 'https://api.linkedin.com/mediaUpload/upload-target-1') {
         binaryUploaded = true;
+        const authHeader = (init?.headers as Record<string, string>)?.['Authorization'];
+        if (!authHeader || !authHeader.includes('Bearer test-linkedin-access-token')) {
+          return new Response('Unauthorized upload', { status: 401 });
+        }
         return new Response('', { status: 201 });
       }
 
@@ -152,6 +156,9 @@ describe('LinkedInAdapter', () => {
 
     expect(result.success).toBe(true);
     expect(registeredCalls).toHaveLength(1);
+    expect(registeredCalls[0].registerUploadRequest.supportedUploadMechanism).toEqual([
+      'SYNCHRONOUS_UPLOAD',
+    ]);
     expect(registeredCalls[0].registerUploadRequest.owner).toBe('urn:li:person:user-789');
     expect(binaryUploaded).toBe(true);
 

@@ -155,6 +155,7 @@ describe('MetaGraphAdapter', () => {
     const adapter = new MetaGraphAdapter({ fetchFn });
     const result = await adapter.dispatch({
       ...baseRequest,
+      linkUrl: 'https://sunshade.icu/article',
       mediaUrls: ['https://cdn.example.com/cover1.jpg', 'https://cdn.example.com/cover2.jpg'],
     });
 
@@ -164,6 +165,8 @@ describe('MetaGraphAdapter', () => {
     expect(photoUploads[0].published).toBe('false');
 
     expect(feedParams).toBeDefined();
+    // Facebook rejects posts that supply both 'link' and 'attached_media', so 'link' must be omitted
+    expect(feedParams?.get('link')).toBeNull();
     const attachedMedia = JSON.parse(feedParams?.get('attached_media') ?? '[]');
     expect(attachedMedia).toEqual([
       { media_fbid: 'photo_fbid_1' },

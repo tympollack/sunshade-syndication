@@ -213,6 +213,15 @@ describe('rssPollerWorker', () => {
             };
           }
 
+          if (table === 'channel_dispatches') {
+            return {
+              insert: async (rows: any) => ({
+                data: rows,
+                error: null,
+              }),
+            };
+          }
+
           throw new Error(`Unexpected table ${table}`);
         },
       } as unknown as SyndicationDbClient;
@@ -338,6 +347,15 @@ describe('rssPollerWorker', () => {
               }),
             };
           }
+          if (table === 'channel_dispatches') {
+            return {
+              insert: async (rows: any) => ({
+                data: rows,
+                error: null,
+              }),
+            };
+          }
+
           throw new Error(`Unexpected table ${table}`);
         },
       } as unknown as SyndicationDbClient;
@@ -459,6 +477,15 @@ describe('rssPollerWorker', () => {
                       error: null,
                     }),
                 }),
+              }),
+            };
+          }
+
+          if (table === 'channel_dispatches') {
+            return {
+              insert: async (rows: any) => ({
+                data: rows,
+                error: null,
               }),
             };
           }

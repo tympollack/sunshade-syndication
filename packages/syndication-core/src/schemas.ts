@@ -127,6 +127,7 @@ export const ChannelDispatchJobSchema = z.object({
   platform: SocialPlatformSchema,
   idempotency_key: z.string().min(1),
   attempt: z.number().int().min(1).default(1),
+  scheduled_for: z.string().nullable().optional(),
   payload: DispatchPayloadSchema,
 });
 export type ChannelDispatchJob = z.infer<typeof ChannelDispatchJobSchema>;

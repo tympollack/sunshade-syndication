@@ -243,6 +243,7 @@ describe('dispatchIsolation', () => {
                 then: (resolve: (val: any) => void) => {
                   for (const [id, row] of Object.entries(dispatches)) {
                     if (filters.id && row.id !== filters.id) continue;
+                    if (filters.idempotency_key && row.idempotency_key !== filters.idempotency_key) continue;
                     if (filters.tenant_id && row.tenant_id !== filters.tenant_id) continue;
                     dispatches[id] = { ...row, ...updates };
                   }
@@ -398,8 +399,8 @@ describe('dispatchIsolation', () => {
 
       const mock = createMockSupabase(
         {
-          'd-1': { id: 'd-1', post_id: 'post-full', tenant_id: 't-1', status: 'pending', attempt: 1 },
-          'd-2': { id: 'd-2', post_id: 'post-full', tenant_id: 't-1', status: 'pending', attempt: 1 },
+          'd-1': { id: 'd-1', post_id: 'post-full', tenant_id: 't-1', idempotency_key: 'post-full:c-bsky', status: 'pending', attempt: 1 },
+          'd-2': { id: 'd-2', post_id: 'post-full', tenant_id: 't-1', idempotency_key: 'post-full:c-x', status: 'pending', attempt: 1 },
         },
         {
           'post-full': { id: 'post-full', tenant_id: 't-1', status: 'queued' },
@@ -457,7 +458,7 @@ describe('dispatchIsolation', () => {
       const linkedinAdapter = createRateLimited429MockAdapter('linkedin');
       const mock = createMockSupabase(
         {
-          'd-retry': { id: 'd-retry', post_id: 'post-retry', tenant_id: 't-1', status: 'pending', attempt: 1 },
+          'd-retry': { id: 'd-retry', post_id: 'post-retry', tenant_id: 't-1', idempotency_key: 'post-retry:c-li', status: 'pending', attempt: 1 },
         },
         {
           'post-retry': { id: 'post-retry', tenant_id: 't-1', status: 'queued' },
@@ -499,8 +500,8 @@ describe('dispatchIsolation', () => {
 
       const mock = createMockSupabase(
         {
-          'd-ok': { id: 'd-ok', post_id: 'post-partial', tenant_id: 't-1', status: 'pending', attempt: 1 },
-          'd-fail': { id: 'd-fail', post_id: 'post-partial', tenant_id: 't-1', status: 'pending', attempt: 1 },
+          'd-ok': { id: 'd-ok', post_id: 'post-partial', tenant_id: 't-1', idempotency_key: 'post-partial:c-bsky', status: 'pending', attempt: 1 },
+          'd-fail': { id: 'd-fail', post_id: 'post-partial', tenant_id: 't-1', idempotency_key: 'post-partial:c-li', status: 'pending', attempt: 1 },
         },
         {
           'post-partial': { id: 'post-partial', tenant_id: 't-1', status: 'queued' },
@@ -548,7 +549,7 @@ describe('dispatchIsolation', () => {
       const unauthorizedLinkedin = createUnauthorized401MockAdapter('linkedin');
       const mock = createMockSupabase(
         {
-          'd-f1': { id: 'd-f1', post_id: 'post-failed', tenant_id: 't-1', status: 'pending', attempt: 1 },
+          'd-f1': { id: 'd-f1', post_id: 'post-failed', tenant_id: 't-1', idempotency_key: 'post-failed:c-li', status: 'pending', attempt: 1 },
         },
         {
           'post-failed': { id: 'post-failed', tenant_id: 't-1', status: 'queued' },

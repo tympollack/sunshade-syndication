@@ -68,7 +68,12 @@ export async function processDispatchBatch(
     if (job.scheduled_for) {
       const scheduledTime = new Date(job.scheduled_for).getTime();
       const currentTime = deps.now ? deps.now() : Date.now();
-      if (!Number.isNaN(scheduledTime) && scheduledTime > currentTime) {
+      if (Number.isNaN(scheduledTime)) {
+        logger.warn('Invalid scheduled_for timestamp; proceeding with immediate dispatch', {
+          dispatchId: job.dispatch_id,
+          scheduledFor: job.scheduled_for,
+        });
+      } else if (scheduledTime > currentTime) {
         const delaySeconds = Math.max(1, Math.min(900, Math.ceil((scheduledTime - currentTime) / 1000)));
         logger.info('Channel dispatch scheduled for future; delaying message in queue', {
           dispatchId: job.dispatch_id,
@@ -94,9 +99,11 @@ export async function processDispatchBatch(
     }
 
     // 2. Atomic per-channel idempotency check in channel_dispatches
+    let existing: { status: string; platform_post_id?: string | null; platform_url?: string | null; attempt?: number } | null = null;
+
     if (deps.db) {
       try {
-        const existing = await getChannelDispatch(deps.db, {
+        existing = await getChannelDispatch(deps.db, {
           dispatchId: job.dispatch_id,
           tenantId: job.tenant_id,
           idempotencyKey: job.idempotency_key,
@@ -153,6 +160,7 @@ export async function processDispatchBatch(
       }
     }
 
+    const currentAttempt = Math.max(job.attempt, existing?.attempt ?? 1);
     const adapter = adapters[job.platform];
 
     if (!adapter) {
@@ -166,8 +174,9 @@ export async function processDispatchBatch(
           await updateChannelDispatch(deps.db, {
             dispatchId: job.dispatch_id,
             tenantId: job.tenant_id,
+            idempotencyKey: job.idempotency_key,
             status: 'failed',
-            attempt: job.attempt,
+            attempt: currentAttempt,
             errorMessage: `Unsupported platform: ${job.platform}`,
           });
           await syncPublicationPostStatus(deps.db, job.post_id, job.tenant_id);
@@ -211,11 +220,12 @@ export async function processDispatchBatch(
           await updateChannelDispatch(deps.db, {
             dispatchId: job.dispatch_id,
             tenantId: job.tenant_id,
+            idempotencyKey: job.idempotency_key,
             status: 'published',
             platformPostId: result.platformPostId,
             platformUrl: result.platformUrl,
             dispatchedAt: new Date(deps.now ? deps.now() : Date.now()).toISOString(),
-            attempt: job.attempt,
+            attempt: currentAttempt,
           });
           await syncPublicationPostStatus(deps.db, job.post_id, job.tenant_id);
         } catch (dbErr) {
@@ -244,15 +254,16 @@ export async function processDispatchBatch(
     }
 
     if (result.retryable) {
-      const backoffSeconds = Math.min(300, 15 * 2 ** Math.max(0, job.attempt - 1));
+      const backoffSeconds = Math.min(300, 15 * 2 ** Math.max(0, currentAttempt - 1));
 
       if (deps.db) {
         try {
           await updateChannelDispatch(deps.db, {
             dispatchId: job.dispatch_id,
             tenantId: job.tenant_id,
+            idempotencyKey: job.idempotency_key,
             status: 'retrying',
-            attempt: job.attempt + 1,
+            attempt: currentAttempt + 1,
             errorMessage: result.error,
           });
         } catch (dbErr) {
@@ -287,8 +298,9 @@ export async function processDispatchBatch(
         await updateChannelDispatch(deps.db, {
           dispatchId: job.dispatch_id,
           tenantId: job.tenant_id,
+          idempotencyKey: job.idempotency_key,
           status: 'failed',
-          attempt: job.attempt,
+          attempt: currentAttempt,
           errorMessage: result.error,
         });
         await syncPublicationPostStatus(deps.db, job.post_id, job.tenant_id);

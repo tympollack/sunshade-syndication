@@ -236,10 +236,11 @@ export async function getChannelDispatch(
     .select('id, status, platform_post_id, platform_url, attempt, error_message')
     .eq('tenant_id', params.tenantId);
 
-  if (params.dispatchId) {
-    query = query.eq('id', params.dispatchId);
-  } else if (params.idempotencyKey) {
+  // Prefer stable post:channel idempotency_key over recreated dispatchId
+  if (params.idempotencyKey) {
     query = query.eq('idempotency_key', params.idempotencyKey);
+  } else if (params.dispatchId) {
+    query = query.eq('id', params.dispatchId);
   } else {
     return null;
   }
@@ -262,6 +263,7 @@ export async function updateChannelDispatch(
   params: {
     dispatchId: string;
     tenantId: string;
+    idempotencyKey?: string;
     status: string;
     platformPostId?: string | null;
     platformUrl?: string | null;
@@ -279,11 +281,18 @@ export async function updateChannelDispatch(
   if (params.attempt !== undefined) updates.attempt = params.attempt;
   if (params.dispatchedAt !== undefined) updates.dispatched_at = params.dispatchedAt;
 
-  const { error } = await db
+  let query = db
     .from('channel_dispatches')
     .update(updates)
-    .eq('id', params.dispatchId)
     .eq('tenant_id', params.tenantId);
+
+  if (params.idempotencyKey) {
+    query = query.eq('idempotency_key', params.idempotencyKey);
+  } else {
+    query = query.eq('id', params.dispatchId);
+  }
+
+  const { error } = await query;
 
   if (error) {
     logger.error('Failed to update channel dispatch', { dispatchId: params.dispatchId, error: error.message });

@@ -12,6 +12,7 @@ import {
   getPublicationPostBySource,
   getSyndicationDbClient,
   isFeedItemProcessed,
+  recordChannelDispatches,
   recordFeedHistory,
   type SyndicationDbClient,
 } from '../lib/supabase.js';
@@ -255,6 +256,21 @@ export async function handleRssCron(
 
           await env.SYNDICATION_QUEUE.sendBatch(queueMessages);
           summary.postsQueued += queueMessages.length;
+
+          // Record initial pending dispatches to track state and allow post status sync on completion
+          await recordChannelDispatches(
+            db,
+            queueMessages.map((msg) => ({
+              id: msg.body.dispatch_id,
+              tenant_id: tenantId,
+              post_id: post!.id,
+              channel_connection_id: msg.body.channel_connection_id,
+              platform: msg.body.platform,
+              status: 'pending',
+              idempotency_key: msg.body.idempotency_key,
+              attempt: 1,
+            })),
+          );
         }
 
         // Record feed history after post creation and queueing succeed

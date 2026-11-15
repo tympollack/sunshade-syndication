@@ -9,6 +9,7 @@ export interface DispatchRequest {
   linkUrl?: string;
   mediaUrls?: string[];
   threadChunks?: string[];
+  scheduledAt?: string | null;
   credentials?: Record<string, unknown>;
 }
 

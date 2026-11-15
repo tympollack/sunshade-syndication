@@ -488,9 +488,21 @@ describe('rssPollerWorker', () => {
         SYNDICATION_QUEUE: mockQueue,
       };
 
+      const mockLinksClient = {
+        createShortLink: vi.fn().mockImplementation((params) => {
+          const suffix = params.utmSource ? `-${params.utmSource}` : '';
+          return Promise.resolve({
+            shortUrl: `https://links-stag.sunshade.icu/s/recovered${suffix}`,
+            slug: `recovered${suffix}`,
+            destinationUrl: params.destinationUrl,
+          });
+        }),
+      } as unknown as LinksClient;
+
       const summary = await handleRssCron(env, {
         db: mockDb,
         fetch: mockFetch,
+        linksClient: mockLinksClient,
       });
 
       expect(summary.itemsProcessed).toBe(1);

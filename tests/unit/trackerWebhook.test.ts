@@ -309,8 +309,22 @@ describe('trackerWebhook', () => {
       SYNDICATION_QUEUE: mockQueue,
     };
 
+    const mockLinksClient = {
+      createShortLink: vi.fn().mockImplementation((params) => {
+        const suffix = params.utmSource ? `-${params.utmSource}` : '';
+        return Promise.resolve({
+          shortUrl: `https://links-stag.sunshade.icu/s/syn104${suffix}`,
+          slug: `syn104${suffix}`,
+          destinationUrl: params.destinationUrl,
+        });
+      }),
+    } as unknown as LinksClient;
+
     const req = await createSignedRequest(VALID_PAYLOAD, TEST_SECRET);
-    const res = await handleTrackerWebhook(req, env, { db: mockDb });
+    const res = await handleTrackerWebhook(req, env, {
+      db: mockDb,
+      linksClient: mockLinksClient,
+    });
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { accepted: boolean; duplicate: boolean; postId: string };
@@ -407,8 +421,22 @@ describe('trackerWebhook', () => {
       SYNDICATION_QUEUE: mockQueue,
     };
 
+    const mockLinksClient = {
+      createShortLink: vi.fn().mockImplementation((params) => {
+        const suffix = params.utmSource ? `-${params.utmSource}` : '';
+        return Promise.resolve({
+          shortUrl: `https://links-stag.sunshade.icu/s/syn104${suffix}`,
+          slug: `syn104${suffix}`,
+          destinationUrl: params.destinationUrl,
+        });
+      }),
+    } as unknown as LinksClient;
+
     const req = await createSignedRequest(VALID_PAYLOAD, TEST_SECRET);
-    const res = await handleTrackerWebhook(req, env, { db: mockDb });
+    const res = await handleTrackerWebhook(req, env, {
+      db: mockDb,
+      linksClient: mockLinksClient,
+    });
 
     expect(res.status).toBe(202);
     expect(enqueuedBatches).toHaveLength(1);

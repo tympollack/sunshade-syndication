@@ -212,3 +212,143 @@ export async function recordChannelDispatches(
     throw new Error(`Database error in recordChannelDispatches: ${error.message}`);
   }
 }
+
+/**
+ * Queries an existing channel dispatch record by ID or idempotency key.
+ */
+export async function getChannelDispatch(
+  db: SyndicationDbClient,
+  params: {
+    dispatchId?: string;
+    tenantId: string;
+    idempotencyKey?: string;
+  },
+): Promise<{
+  id: string;
+  status: string;
+  platform_post_id?: string | null;
+  platform_url?: string | null;
+  attempt?: number;
+  error_message?: string | null;
+} | null> {
+  let query = db
+    .from('channel_dispatches')
+    .select('id, status, platform_post_id, platform_url, attempt, error_message')
+    .eq('tenant_id', params.tenantId);
+
+  if (params.dispatchId) {
+    query = query.eq('id', params.dispatchId);
+  } else if (params.idempotencyKey) {
+    query = query.eq('idempotency_key', params.idempotencyKey);
+  } else {
+    return null;
+  }
+
+  const { data, error } = await query.maybeSingle();
+
+  if (error) {
+    logger.error('Failed to query channel dispatch', { ...params, error: error.message });
+    throw new Error(`Database error in getChannelDispatch: ${error.message}`);
+  }
+
+  return data ?? null;
+}
+
+/**
+ * Updates atomic per-channel state in `syndication.channel_dispatches`.
+ */
+export async function updateChannelDispatch(
+  db: SyndicationDbClient,
+  params: {
+    dispatchId: string;
+    tenantId: string;
+    status: string;
+    platformPostId?: string | null;
+    platformUrl?: string | null;
+    errorMessage?: string | null;
+    attempt?: number;
+    dispatchedAt?: string | null;
+  },
+): Promise<void> {
+  const updates: Record<string, unknown> = {
+    status: params.status,
+  };
+  if (params.platformPostId !== undefined) updates.platform_post_id = params.platformPostId;
+  if (params.platformUrl !== undefined) updates.platform_url = params.platformUrl;
+  if (params.errorMessage !== undefined) updates.error_message = params.errorMessage;
+  if (params.attempt !== undefined) updates.attempt = params.attempt;
+  if (params.dispatchedAt !== undefined) updates.dispatched_at = params.dispatchedAt;
+
+  const { error } = await db
+    .from('channel_dispatches')
+    .update(updates)
+    .eq('id', params.dispatchId)
+    .eq('tenant_id', params.tenantId);
+
+  if (error) {
+    logger.error('Failed to update channel dispatch', { dispatchId: params.dispatchId, error: error.message });
+    throw new Error(`Database error in updateChannelDispatch: ${error.message}`);
+  }
+}
+
+/**
+ * Synchronizes publication post status based on the aggregate status of its channel dispatches.
+ */
+export async function syncPublicationPostStatus(
+  db: SyndicationDbClient,
+  postId: string,
+  tenantId: string,
+): Promise<string | null> {
+  const { data: dispatches, error } = await db
+    .from('channel_dispatches')
+    .select('id, status')
+    .eq('post_id', postId)
+    .eq('tenant_id', tenantId);
+
+  if (error) {
+    logger.error('Failed to query channel dispatches for post status sync', { postId, error: error.message });
+    throw new Error(`Database error in syncPublicationPostStatus: ${error.message}`);
+  }
+
+  if (!dispatches || dispatches.length === 0) {
+    return null;
+  }
+
+  const allPublished = dispatches.every((d) => d.status === 'published');
+  const allTerminal = dispatches.every((d) => ['published', 'failed', 'skipped'].includes(d.status));
+  const anyPublished = dispatches.some((d) => d.status === 'published');
+  const allFailed = dispatches.every((d) => d.status === 'failed');
+
+  let targetStatus: string | null = null;
+  let publishedAt: string | undefined = undefined;
+
+  if (allPublished) {
+    targetStatus = 'published';
+    publishedAt = new Date().toISOString();
+  } else if (allFailed) {
+    targetStatus = 'failed';
+  } else if (allTerminal) {
+    targetStatus = anyPublished ? 'partial_failure' : 'failed';
+  } else if (anyPublished) {
+    targetStatus = 'publishing';
+  }
+
+  if (targetStatus) {
+    const updatePayload: Record<string, unknown> = { status: targetStatus };
+    if (publishedAt) {
+      updatePayload.published_at = publishedAt;
+    }
+    const { error: updateErr } = await db
+      .from('publication_posts')
+      .update(updatePayload)
+      .eq('id', postId)
+      .eq('tenant_id', tenantId);
+
+    if (updateErr) {
+      logger.error('Failed to update publication post status', { postId, targetStatus, error: updateErr.message });
+      throw new Error(`Database error in syncPublicationPostStatus: ${updateErr.message}`);
+    }
+  }
+
+  return targetStatus;
+}

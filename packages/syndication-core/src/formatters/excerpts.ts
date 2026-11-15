@@ -18,15 +18,24 @@ const HTML_ENTITIES: Record<string, string> = {
   '&nbsp;': ' ',
 };
 
+// Regex matching HTML tags (e.g. <p>, <div class="x">, <br/>, </b>) while avoiding
+// false matches on comparison operators (< 10ms) or single-letter generic placeholders (<T>)
+const HTML_TAG_REGEX = /<(?:\/?[a-zA-Z]{2,}|\/?(?:p|b|i|u|a|s|q))(?:\s+[^>]*)?\/?>/gi;
+
 /**
  * Strips HTML tags, decodes common HTML entities, and normalizes whitespace.
+ * Preserves literal angle brackets, comparison operators, and generic placeholders.
  */
 export function normalizeCopy(raw: string): string {
-  const withoutTags = raw.replace(/<[^>]+>/g, ' ');
+  // 1. Strip recognized HTML tags
+  const withoutTags = raw.replace(HTML_TAG_REGEX, ' ');
+
+  // 2. Decode standard HTML entities
   const decoded = withoutTags.replace(
     /&(?:amp|lt|gt|quot|#39|apos|rsquo|lsquo|rdquo|ldquo|mdash|ndash|nbsp);/g,
     (entity) => HTML_ENTITIES[entity] ?? entity,
   );
+
   return decoded.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 }
 

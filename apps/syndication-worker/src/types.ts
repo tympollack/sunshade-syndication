@@ -10,6 +10,7 @@ export interface WorkerEnv {
   TRACKER_WEBHOOK_SECRET?: string;
   INTERNAL_HEALTH_TOKEN?: string;
   SUBSTACK_FEED_URLS?: string;
+  DEFAULT_TENANT_ID?: string;
   SYNDICATION_KV?: KVNamespace;
   SYNDICATION_QUEUE?: Queue<ChannelDispatchJob>;
 }

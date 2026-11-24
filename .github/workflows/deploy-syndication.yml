@@ -11,6 +11,10 @@ on:
       - staging
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify-and-deploy:
     name: Verify & Deploy Syndication Worker
@@ -58,21 +62,22 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/syndication-worker
-          command: deploy --env staging
+          environment: staging
+          command: deploy
           secrets: |
             SUPABASE_URL
             SUPABASE_SERVICE_ROLE_KEY
             TRACKER_WEBHOOK_SECRET
             INTERNAL_HEALTH_TOKEN
-            LINKS_API_URL
             MASTER_API_KEY
+            SUNSHADE_MASTER_API_KEY
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TRACKER_WEBHOOK_SECRET: ${{ secrets.TRACKER_WEBHOOK_SECRET }}
+          SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TRACKER_WEBHOOK_SECRET: ${{ secrets.STAGING_TRACKER_WEBHOOK_SECRET || secrets.TRACKER_WEBHOOK_SECRET }}
           INTERNAL_HEALTH_TOKEN: ${{ secrets.INTERNAL_HEALTH_TOKEN }}
-          LINKS_API_URL: ${{ secrets.LINKS_API_URL }}
           MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
+          SUNSHADE_MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
 
       - name: Deploy Production Worker (publish.sunshade.icu)
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -81,21 +86,22 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/syndication-worker
-          command: deploy --env production
+          environment: production
+          command: deploy
           secrets: |
             SUPABASE_URL
             SUPABASE_SERVICE_ROLE_KEY
             TRACKER_WEBHOOK_SECRET
             INTERNAL_HEALTH_TOKEN
-            LINKS_API_URL
             MASTER_API_KEY
+            SUNSHADE_MASTER_API_KEY
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TRACKER_WEBHOOK_SECRET: ${{ secrets.TRACKER_WEBHOOK_SECRET }}
           INTERNAL_HEALTH_TOKEN: ${{ secrets.INTERNAL_HEALTH_TOKEN }}
-          LINKS_API_URL: ${{ secrets.LINKS_API_URL }}
           MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
+          SUNSHADE_MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
 
       - name: Post-Deploy Health Check (/api/health)
         if: github.event_name != 'pull_request'

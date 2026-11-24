@@ -27,7 +27,7 @@ export class LinksClient {
 
   constructor(env: WorkerEnv) {
     this.baseUrl = (env.LINKS_API_URL ?? 'https://links-stag.sunshade.icu').replace(/\/+$/, '');
-    this.apiKey = env.SUNSHADE_MASTER_API_KEY;
+    this.apiKey = env.SUNSHADE_MASTER_API_KEY || (env as any).MASTER_API_KEY;
   }
 
   async createShortLink(params: CreateShortLinkParams): Promise<CreateShortLinkResult | null> {

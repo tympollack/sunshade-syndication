@@ -189,6 +189,7 @@ async function ensureWorkerDomain(hostname, serviceName, environment, zoneId) {
 
   if (res.ok) {
     console.log(`[cf:provision] Attached Worker custom domain "${hostname}" to service "${serviceName}".`);
+    await removeCnameIfPresent(zoneId, hostname);
   } else {
     console.log(`[cf:provision] Worker custom domain attachment for "${hostname}" note: ${res.payload.errors?.[0]?.message || 'will bind upon initial worker deploy via wrangler.toml'}.`);
   }
@@ -208,11 +209,7 @@ async function main() {
   const zoneId = await resolveZoneId();
   console.log(`[cf:provision] Resolved zone "${ROOT_ZONE}" (ID: ${zoneId}).`);
 
-  // 4. Remove any explicit CNAMEs so Worker Custom Domains bind directly
-  await removeCnameIfPresent(zoneId, PRODUCTION_DOMAIN);
-  await removeCnameIfPresent(zoneId, STAGING_DOMAIN);
-
-  // 5. Worker Custom Domains
+  // 4. Worker Custom Domains
   await ensureWorkerDomain(PRODUCTION_DOMAIN, WORKER_SERVICE_PROD, 'production', zoneId);
   await ensureWorkerDomain(STAGING_DOMAIN, WORKER_SERVICE_STAG, 'staging', zoneId);
 

@@ -39,6 +39,9 @@ jobs:
             exit 1
           fi
 
+      - name: Build core package
+        run: npm --workspace=packages/syndication-core run build
+
       - name: TypeScript Compiler Verification
         run: npx tsc --noEmit
 

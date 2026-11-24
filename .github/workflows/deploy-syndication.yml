@@ -55,6 +55,21 @@ jobs:
       - name: Build All Workspaces
         run: npm run build
 
+      - name: Validate Supabase Staging Credentials
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/staging'
+        run: |
+          HAS_STAGING_URL="${{ secrets.STAGING_SUPABASE_URL != '' && '1' || '0' }}"
+          HAS_STAGING_KEY="${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY != '' && '1' || '0' }}"
+          if [ "$HAS_STAGING_URL" -ne "$HAS_STAGING_KEY" ]; then
+            echo "::error::Mismatched staging credentials! STAGING_SUPABASE_URL and STAGING_SUPABASE_SERVICE_ROLE_KEY must both be configured together or both omitted to avoid mixing project credentials."
+            exit 1
+          fi
+          if [ "$HAS_STAGING_URL" -eq "1" ]; then
+            echo "Staging Supabase credentials configured as a matched pair."
+          else
+            echo "No separate staging Supabase credentials found; using shared credentials."
+          fi
+
       - name: Deploy Staging Worker (publish-stag.sunshade.icu)
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/staging'
         uses: cloudflare/wrangler-action@v3
@@ -72,8 +87,8 @@ jobs:
             MASTER_API_KEY
             SUNSHADE_MASTER_API_KEY
         env:
-          SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL || secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL != '' && secrets.STAGING_SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY != '' && secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TRACKER_WEBHOOK_SECRET: ${{ secrets.STAGING_TRACKER_WEBHOOK_SECRET || secrets.TRACKER_WEBHOOK_SECRET }}
           INTERNAL_HEALTH_TOKEN: ${{ secrets.INTERNAL_HEALTH_TOKEN }}
           MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}

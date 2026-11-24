@@ -1,0 +1,133 @@
+name: Deploy SunShade Syndication
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-deploy:
+    name: Verify & Deploy Syndication Worker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify no SQL migrations in service repo
+        run: |
+          if find . -path ./node_modules -prune -o -name '*.sql' -print | grep -q .; then
+            echo "ERROR: SQL migration files belong exclusively in sunshade-db-platform."
+            exit 1
+          fi
+
+      - name: Build core package
+        run: npm --workspace=packages/syndication-core run build
+
+      - name: TypeScript Compiler Verification
+        run: npx tsc --noEmit
+
+      - name: Run Test Suite
+        run: npm test
+
+      - name: Build All Workspaces
+        run: npm run build
+
+      - name: Validate Supabase Staging Credentials
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/staging'
+        run: |
+          HAS_STAGING_URL="${{ secrets.STAGING_SUPABASE_URL != '' && '1' || '0' }}"
+          HAS_STAGING_KEY="${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY != '' && '1' || '0' }}"
+          if [ "$HAS_STAGING_URL" -ne "$HAS_STAGING_KEY" ]; then
+            echo "::error::Mismatched staging credentials! STAGING_SUPABASE_URL and STAGING_SUPABASE_SERVICE_ROLE_KEY must both be configured together or both omitted to avoid mixing project credentials."
+            exit 1
+          fi
+          if [ "$HAS_STAGING_URL" -eq "1" ]; then
+            echo "Staging Supabase credentials configured as a matched pair."
+          else
+            echo "No separate staging Supabase credentials found; using shared credentials."
+          fi
+
+      - name: Deploy Staging Worker (publish-stag.sunshade.icu)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/staging'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/syndication-worker
+          environment: staging
+          command: deploy
+          secrets: |
+            SUPABASE_URL
+            SUPABASE_SERVICE_ROLE_KEY
+            TRACKER_WEBHOOK_SECRET
+            INTERNAL_HEALTH_TOKEN
+            MASTER_API_KEY
+            SUNSHADE_MASTER_API_KEY
+        env:
+          SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL != '' && secrets.STAGING_SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY != '' && secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TRACKER_WEBHOOK_SECRET: ${{ secrets.STAGING_TRACKER_WEBHOOK_SECRET || secrets.TRACKER_WEBHOOK_SECRET }}
+          INTERNAL_HEALTH_TOKEN: ${{ secrets.INTERNAL_HEALTH_TOKEN }}
+          MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
+          SUNSHADE_MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
+
+      - name: Deploy Production Worker (publish.sunshade.icu)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/syndication-worker
+          environment: production
+          command: deploy
+          secrets: |
+            SUPABASE_URL
+            SUPABASE_SERVICE_ROLE_KEY
+            TRACKER_WEBHOOK_SECRET
+            INTERNAL_HEALTH_TOKEN
+            MASTER_API_KEY
+            SUNSHADE_MASTER_API_KEY
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TRACKER_WEBHOOK_SECRET: ${{ secrets.TRACKER_WEBHOOK_SECRET }}
+          INTERNAL_HEALTH_TOKEN: ${{ secrets.INTERNAL_HEALTH_TOKEN }}
+          MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
+          SUNSHADE_MASTER_API_KEY: ${{ secrets.MASTER_API_KEY }}
+
+      - name: Post-Deploy Health Check (/api/health)
+        if: github.event_name != 'pull_request'
+        run: |
+          TARGET_HOST="${{ github.ref == 'refs/heads/main' && 'https://publish.sunshade.icu' || 'https://publish-stag.sunshade.icu' }}"
+          echo "Verifying health endpoint at $TARGET_HOST/api/health..."
+          sleep 5
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --retry 6 --retry-delay 5 --retry-connrefused "$TARGET_HOST/api/health")
+          echo "HTTP response status: $STATUS"
+          if [ "$STATUS" -ne 200 ]; then
+            echo "Smoke test verification failed: expected HTTP 200, received $STATUS"
+            exit 1
+          fi
+          echo "Smoke test passed successfully: $TARGET_HOST/api/health is live and healthy."
